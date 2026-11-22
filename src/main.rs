@@ -1,6 +1,17 @@
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread,
+    time::Duration,
+};
 
-use std::{thread, time::Duration};
 use sysinfo::{ProcessesToUpdate, System};
+
+use native_windows_gui as nwg;
+
+use std::rc::Rc;
 
 const TARGET_PROCESSES: &[&str] = &[
     "WpcUapApp.exe",
@@ -8,34 +19,293 @@ const TARGET_PROCESSES: &[&str] = &[
 
 const CHECK_INTERVAL: u64 = 500;
 
-fn main() {
-    let mut system = System::new().expect("Failed to initialize system");
+fn start_process_monitor(
+    paused: Arc<AtomicBool>,
+    stop: Arc<AtomicBool>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let mut system = System::new()
+            .expect("Failed to initialize sysinfo");
 
-    println!("Process watcher started.");
+        println!("Process monitor started.");
 
-    loop {
-        system.refresh_processes(ProcessesToUpdate::All, true);
-
-        for (pid, process) in system.processes() {
-            let name = process.name().to_string_lossy().to_lowercase();
-
-            if TARGET_PROCESSES.iter().any(|target| {
-                name == target.to_lowercase()
-            }) {
-                println!(
-                    "Found {} (PID: {}). Terminating...",
-                    name,
-                    pid
+        while !stop.load(Ordering::SeqCst) {
+            if !paused.load(Ordering::SeqCst) {
+                system.refresh_processes(
+                    ProcessesToUpdate::All,
+                    true,
                 );
 
-                if process.kill() {
-                    println!("Process terminated.");
-                } else {
-                    println!("Failed to terminate process.");
+                for (pid, process) in system.processes() {
+                    let name = process
+                        .name()
+                        .to_string_lossy();
+
+                    let matches = TARGET_PROCESSES
+                        .iter()
+                        .any(|target| name.eq_ignore_ascii_case(target));
+
+                    if matches {
+                        println!(
+                            "Found {} (PID: {}). Terminating...",
+                            name,
+                            pid
+                        );
+
+                        if process.kill() {
+                            println!("Process terminated.");
+                        } else {
+                            println!("Failed to terminate process.");
+                        }
+                    }
                 }
             }
+
+            thread::sleep(Duration::from_millis(CHECK_INTERVAL));
         }
 
-        thread::sleep(Duration::from_millis(CHECK_INTERVAL));
+        println!("Process monitor stopped.");
+    })
+}
+
+fn toggle_monitoring(
+    paused: &AtomicBool,
+    button: &nwg::Button,
+    status: &nwg::Label,
+) {
+    let was_paused = paused.fetch_xor(true, Ordering::SeqCst);
+    let now_paused = !was_paused;
+
+    if now_paused {
+        button.set_text("Resume monitoring");
+        status.set_text("Monitoring is paused");
+    } else {
+        button.set_text("Pause monitoring");
+        status.set_text("Monitoring is running");
     }
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Shared monitoring state
+    let paused = Arc::new(AtomicBool::new(false));
+    let stop = Arc::new(AtomicBool::new(false));
+
+    // Start background process monitoring
+    let monitor = start_process_monitor(
+        Arc::clone(&paused),
+        Arc::clone(&stop),
+    );
+
+    // Initialize Windows GUI
+    nwg::init()?;
+
+    nwg::Font::set_global_family("Segoe UI")?;
+
+    // Tray icon
+    let icon = nwg::Icon::from_system(
+        nwg::OemIcon::Information
+    );
+
+    let mut message_window = nwg::MessageWindow::default();
+
+    nwg::MessageWindow::builder()
+        .build(&mut message_window)?;
+
+    let mut tray = nwg::TrayNotification::default();
+
+    nwg::TrayNotification::builder()
+        .parent(&message_window)
+        .icon(Some(&icon))
+        .tip(Some("Process Watcher"))
+        .build(&mut tray)?;
+
+    // Tray context menu
+    let mut tray_menu = nwg::Menu::default();
+
+    nwg::Menu::builder()
+        .popup(true)
+        .parent(&message_window)
+        .build(&mut tray_menu)?;
+
+    let mut expand_item = nwg::MenuItem::default();
+    let mut toggle_item = nwg::MenuItem::default();
+    let mut exit_item = nwg::MenuItem::default();
+
+    nwg::MenuItem::builder()
+        .text("Expand")
+        .parent(&tray_menu)
+        .build(&mut expand_item)?;
+
+    nwg::MenuItem::builder()
+        .text("Pause / Resume monitoring")
+        .parent(&tray_menu)
+        .build(&mut toggle_item)?;
+
+    nwg::MenuItem::builder()
+        .text("Exit")
+        .parent(&tray_menu)
+        .build(&mut exit_item)?;
+
+    // Main application window (initially hidden)
+    let mut window = nwg::Window::default();
+
+    nwg::Window::builder()
+        .flags(nwg::WindowFlags::WINDOW)
+        .size((360, 190))
+        .position((500, 300))
+        .title("Process Watcher")
+        .build(&mut window)?;
+
+    let mut status = nwg::Label::default();
+
+    nwg::Label::builder()
+        .text("Monitoring is running")
+        .position((20, 20))
+        .size((320, 25))
+        .parent(&window)
+        .build(&mut status)?;
+
+    let mut description = nwg::Label::default();
+
+    nwg::Label::builder()
+        .text("Watching configured process names.")
+        .position((20, 55))
+        .size((320, 25))
+        .parent(&window)
+        .build(&mut description)?;
+
+    let mut pause_button = nwg::Button::default();
+
+    nwg::Button::builder()
+        .text("Pause monitoring")
+        .position((20, 100))
+        .size((150, 35))
+        .parent(&window)
+        .build(&mut pause_button)?;
+
+    let mut minimize_button = nwg::Button::default();
+
+    nwg::Button::builder()
+        .text("Hide to tray")
+        .position((185, 100))
+        .size((150, 35))
+        .parent(&window)
+        .build(&mut minimize_button)?;
+
+    // ControlHandle is Copy. Grab the handles now so the event closures can
+    // compare against them without borrowing (or moving) the controls.
+    // The controls themselves stay alive in this function until shutdown.
+    let window_handle = window.handle;
+    let pause_handle = pause_button.handle;
+    let hide_handle = minimize_button.handle;
+    let tray_handle = tray.handle;
+    let expand_handle = expand_item.handle;
+    let toggle_handle = toggle_item.handle;
+    let exit_handle = exit_item.handle;
+
+    // Shared UI references
+    let window = Rc::new(window);
+    let status = Rc::new(status);
+    let pause_button = Rc::new(pause_button);
+
+    // Tray event handler
+    let tray_events = {
+        let window = Rc::clone(&window);
+        let status = Rc::clone(&status);
+        let pause_button = Rc::clone(&pause_button);
+
+        let paused = Arc::clone(&paused);
+        let stop = Arc::clone(&stop);
+
+        nwg::full_bind_event_handler(
+            &message_window.handle,
+            move |evt, _evt_data, handle| {
+                match evt {
+                    nwg::Event::OnContextMenu => {
+                        if handle == tray_handle {
+                            let (x, y) = nwg::GlobalCursor::position();
+                            tray_menu.popup(x, y);
+                        }
+                    }
+
+                    nwg::Event::OnMenuItemSelected => {
+                        if handle == expand_handle {
+                            window.set_visible(true);
+                            window.set_focus();
+                        }
+
+                        if handle == toggle_handle {
+                            toggle_monitoring(
+                                &paused,
+                                &pause_button,
+                                &status,
+                            );
+                        }
+
+                        if handle == exit_handle {
+                            stop.store(true, Ordering::SeqCst);
+                            nwg::stop_thread_dispatch();
+                        }
+                    }
+
+                    _ => {}
+                }
+            },
+        )
+    };
+
+    // Window event handler: close (hides instead), pause button, hide button
+    let window_events = {
+        let window = Rc::clone(&window);
+        let status = Rc::clone(&status);
+        let pause_button = Rc::clone(&pause_button);
+        let paused = Arc::clone(&paused);
+
+        nwg::full_bind_event_handler(
+            &window_handle,
+            move |evt, evt_data, handle| {
+                match evt {
+                    nwg::Event::OnWindowClose => {
+                        if handle == window_handle {
+                            // Cancel the close and just hide the window
+                            if let nwg::EventData::OnWindowClose(close_data) = &evt_data {
+                                close_data.close(false);
+                            }
+
+                            window.set_visible(false);
+                        }
+                    }
+
+                    nwg::Event::OnButtonClick => {
+                        if handle == pause_handle {
+                            toggle_monitoring(
+                                &paused,
+                                &pause_button,
+                                &status,
+                            );
+                        } else if handle == hide_handle {
+                            window.set_visible(false);
+                        }
+                    }
+
+                    _ => {}
+                }
+            },
+        )
+    };
+
+    println!("Process Watcher is running in the system tray.");
+
+    // Start Windows message loop
+    nwg::dispatch_thread_events();
+
+    // Shutdown
+    stop.store(true, Ordering::SeqCst);
+
+    let _ = monitor.join();
+
+    nwg::unbind_event_handler(&tray_events);
+    nwg::unbind_event_handler(&window_events);
+
+    Ok(())
 }

@@ -1,10 +1,19 @@
 [package]
-name = "FamilyGone"
+name = "process_watcher"
 version = "0.1.0"
 edition = "2024"
 
+[build-dependencies]
+embed-manifest = "1.4"
+winresource = "0.1"
+
 [dependencies]
-egui = "0.37.0"
 sysinfo = "0.40.4"
-tao = "0.37.3"
-tray-icon = "0.26.1"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+native-windows-gui = { version = "1.0.13", default-features = false, features = [
+    "tray-notification",
+    "message-window",
+    "menu",
+    "cursor"
+] }
