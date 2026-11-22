@@ -12,7 +12,7 @@ embed-manifest = "1.4"
 sysinfo = "0.40.4"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-winapi = { version = "0.3", features = ["shellapi", "winnt", "sysinfoapi"] }
+winapi = { version = "0.3", features = ["libloaderapi", "winnt", "winuser", "sysinfoapi"] }
 native-windows-gui = { version = "1.0.13", default-features = false, features = [
     "tray-notification",
     "message-window",

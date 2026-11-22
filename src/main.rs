@@ -1,3 +1,4 @@
+#![windows_subsystem = "windows"]
 use std::{
     sync::{
         Arc,
@@ -68,15 +69,20 @@ fn start_process_monitor(
     })
 }
 
-use winapi::um::shellapi::ExtractIconW;
-use winapi::um::winnt::HANDLE;
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::ptr;
+use winapi::um::libloaderapi::{FreeLibrary, LoadLibraryExW, LOAD_LIBRARY_AS_DATAFILE};
 use winapi::um::sysinfoapi::GetSystemDirectoryW;
+use winapi::um::winnt::HANDLE;
+use winapi::um::winuser::{
+    GetSystemMetrics, LoadImageW, IMAGE_ICON, LR_DEFAULTCOLOR, SM_CXICON, SM_CXSMICON,
+    SM_CYICON, SM_CYSMICON,
+};
 
-/// Loads an icon by resource ID straight out of shell32.dll (built into Windows).
-/// Pass a positive resource id, e.g. 1027.
+const ICON_DLL: &str = "imageres.dll";
+const ICON_ID: u16 = 1027; // the number from "imageres.dll,-1027"
+
 fn system_dll_path(dll_name: &str) -> Vec<u16> {
     let mut buf = [0u16; 260];
     let len = unsafe { GetSystemDirectoryW(buf.as_mut_ptr(), buf.len() as u32) };
@@ -89,20 +95,35 @@ fn system_dll_path(dll_name: &str) -> Vec<u16> {
     path
 }
 
-fn load_icon_from_dll(dll_name: &str, resource_id: i32) -> nwg::Icon {
+/// Loads icon `resource_id` from a system DLL at an exact pixel size.
+fn load_icon_from_dll(dll_name: &str, resource_id: u16, width: i32, height: i32) -> nwg::Icon {
     let path = system_dll_path(dll_name);
 
-    let hicon = unsafe {
-        ExtractIconW(ptr::null_mut(), path.as_ptr(), (-resource_id) as u32)
+    let hicon: HANDLE = unsafe {
+        let module = LoadLibraryExW(path.as_ptr(), ptr::null_mut(), LOAD_LIBRARY_AS_DATAFILE);
+        if module.is_null() {
+            ptr::null_mut()
+        } else {
+            let handle = LoadImageW(
+                module,
+                resource_id as usize as *const u16, // MAKEINTRESOURCE
+                IMAGE_ICON,
+                width,
+                height,
+                LR_DEFAULTCOLOR,
+            );
+            FreeLibrary(module); // the icon is an independent copy, safe to unload
+            handle
+        }
     };
 
-    if hicon.is_null() || hicon as usize == 1 {
-        eprintln!("Warning: {} icon {} not found, falling back to default", dll_name, resource_id);
+    if hicon.is_null() {
+        // Visible fallback (blue "i"), since eprintln! is invisible in a windows-subsystem app
         return nwg::Icon::from_system(nwg::OemIcon::Information);
     }
 
     let mut icon = nwg::Icon::default();
-    icon.handle = hicon as HANDLE;
+    icon.handle = hicon;
     icon
 }
 
@@ -140,7 +161,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     nwg::Font::set_global_family("Segoe UI")?;
     
     // Tray icon
-    let icon = load_icon_from_dll("shell32.dll", 1027);
+    let (small_w, small_h, big_w, big_h) = unsafe {
+    (
+        GetSystemMetrics(SM_CXSMICON),
+        GetSystemMetrics(SM_CYSMICON),
+        GetSystemMetrics(SM_CXICON),
+        GetSystemMetrics(SM_CYICON),
+    )
+};
+let tray_icon = load_icon_from_dll(ICON_DLL, ICON_ID, small_w, small_h);
+let window_icon = load_icon_from_dll(ICON_DLL, ICON_ID, big_w, big_h);
 
     
 
@@ -152,10 +182,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut tray = nwg::TrayNotification::default();
 
     nwg::TrayNotification::builder()
-        .parent(&message_window)
-        .icon(Some(&icon))
-        .tip(Some("Process Watcher"))
-        .build(&mut tray)?;
+     .parent(&message_window)
+     .icon(Some(&tray_icon))
+     .tip(Some("Process Watcher"))
+     .build(&mut tray)?;
 
     // Tray context menu
     let mut tray_menu = nwg::Menu::default();
@@ -188,12 +218,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut window = nwg::Window::default();
 
     nwg::Window::builder()
-        .flags(nwg::WindowFlags::WINDOW)
-        .size((360, 190))
-        .position((500, 300))
-        .title("Process Watcher")
-        .icon(Some(&icon))
-        .build(&mut window)?;
+     .flags(nwg::WindowFlags::WINDOW)
+     .size((360, 190))
+     .position((500, 300))
+     .title("Process Watcher")
+     .icon(Some(&window_icon))
+     .build(&mut window)?;
 
     let mut status = nwg::Label::default();
 
