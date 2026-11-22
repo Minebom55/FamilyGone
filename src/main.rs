@@ -68,6 +68,44 @@ fn start_process_monitor(
     })
 }
 
+use winapi::um::shellapi::ExtractIconW;
+use winapi::um::winnt::HANDLE;
+use std::ffi::OsStr;
+use std::os::windows::ffi::OsStrExt;
+use std::ptr;
+use winapi::um::sysinfoapi::GetSystemDirectoryW;
+
+/// Loads an icon by resource ID straight out of shell32.dll (built into Windows).
+/// Pass a positive resource id, e.g. 1027.
+fn system_dll_path(dll_name: &str) -> Vec<u16> {
+    let mut buf = [0u16; 260];
+    let len = unsafe { GetSystemDirectoryW(buf.as_mut_ptr(), buf.len() as u32) };
+    let mut path: Vec<u16> = buf[..len as usize].to_vec();
+    path.push('\\' as u16);
+    for c in OsStr::new(dll_name).encode_wide() {
+        path.push(c);
+    }
+    path.push(0);
+    path
+}
+
+fn load_icon_from_dll(dll_name: &str, resource_id: i32) -> nwg::Icon {
+    let path = system_dll_path(dll_name);
+
+    let hicon = unsafe {
+        ExtractIconW(ptr::null_mut(), path.as_ptr(), (-resource_id) as u32)
+    };
+
+    if hicon.is_null() || hicon as usize == 1 {
+        eprintln!("Warning: {} icon {} not found, falling back to default", dll_name, resource_id);
+        return nwg::Icon::from_system(nwg::OemIcon::Information);
+    }
+
+    let mut icon = nwg::Icon::default();
+    icon.handle = hicon as HANDLE;
+    icon
+}
+
 fn toggle_monitoring(
     paused: &AtomicBool,
     button: &nwg::Button,
@@ -100,11 +138,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     nwg::init()?;
 
     nwg::Font::set_global_family("Segoe UI")?;
-
+    
     // Tray icon
-    let icon = nwg::Icon::from_system(
-        nwg::OemIcon::Information
-    );
+    let icon = load_icon_from_dll("shell32.dll", 1027);
+
+    
 
     let mut message_window = nwg::MessageWindow::default();
 
@@ -154,6 +192,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .size((360, 190))
         .position((500, 300))
         .title("Process Watcher")
+        .icon(Some(&icon))
         .build(&mut window)?;
 
     let mut status = nwg::Label::default();
