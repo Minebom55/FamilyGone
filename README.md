@@ -1,6 +1,6 @@
 # Process Watcher
 
-A small Windows system tray app, written in Rust, that watches for specific processes and terminates them as soon as they appear.
+A small Windows system tray app, written in Rust, that watches for specific processes and terminates them as soon as they appear. Defualt is to kill the familysafety that opens randomly.
 
 It runs quietly in the background with no console window, and can be paused, resumed or closed from the tray icon.
 
